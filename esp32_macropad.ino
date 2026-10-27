@@ -8,6 +8,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Update.h>
+#include "mbedtls/base64.h"
 
 // -----------------------------------------------------------------------------
 // Lightweight NimBLE Engine
@@ -25,7 +27,7 @@
 #define API_VERSION 2
 #endif
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "4.2.0"
+#define FIRMWARE_VERSION "4"
 #endif
 #ifndef SETUP_AP_PREFIX
 #define SETUP_AP_PREFIX "MacroPad"
@@ -97,6 +99,10 @@ String bleDeviceName = "Studio Pad 1";
 bool inSetupMode = false;
 bool setup_done = false;
 bool mdnsStarted = false;
+
+// OTA Stream Flash Tracking
+size_t otaTotalSize = 0;
+size_t otaBytesWritten = 0;
 String setupSsid = "";
 String setupPass = "";
 
@@ -1164,6 +1170,92 @@ void processSerialPacket(const String& body) {
     Serial.println(buildStatusJson());
     return;
   }
+
+  // --- USB Serial Stream Flash Handlers ---
+  if (path == "/api/ota/begin") {
+    int size = 0;
+    jsonInt(body, "size", size);
+    otaTotalSize = (size > 0) ? (size_t)size : UPDATE_SIZE_UNKNOWN;
+    otaBytesWritten = 0;
+
+    // Disconnect BLE & release keys to free memory and prevent interference
+    if (bleKeyboard.isConnected()) bleKeyboard.releaseAll();
+
+    // Show visual status on OLED
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(14, 16);
+    display.println("UPDATING FIRMWARE");
+    display.setCursor(10, 36);
+    display.println("Streaming via USB...");
+    display.display();
+
+    if (Update.begin(otaTotalSize, U_FLASH)) {
+      Serial.println("{\"ok\":true,\"message\":\"OTA begin ready.\"}");
+    } else {
+      Serial.println("{\"ok\":false,\"message\":\"Update.begin failed.\"}");
+    }
+    return;
+  }
+
+  if (path == "/api/ota/chunk") {
+    String b64 = "";
+    // Accepts either "data" or "chunk" keys
+    if (!jsonString(body, "data", b64, 3500)) {
+      jsonString(body, "chunk", b64, 3500);
+    }
+
+    if (b64.length() == 0) {
+      Serial.println("{\"ok\":false,\"message\":\"Missing chunk data.\"}");
+      return;
+    }
+
+    // Decode base64 stream directly to buffer
+    uint8_t decodeBuf[2560];
+    size_t outLen = 0;
+    int ret = mbedtls_base64_decode(decodeBuf, sizeof(decodeBuf), &outLen, 
+                                    (const unsigned char*)b64.c_str(), b64.length());
+
+    if (ret != 0 || outLen == 0) {
+      Serial.println("{\"ok\":false,\"message\":\"Base64 decode failed.\"}");
+      return;
+    }
+
+    size_t written = Update.write(decodeBuf, outLen);
+    if (written == outLen) {
+      otaBytesWritten += written;
+      Serial.println("{\"ok\":true,\"written\":" + String(written) + ",\"total\":" + String(otaBytesWritten) + "}");
+    } else {
+      Serial.println("{\"ok\":false,\"message\":\"Flash write failed.\"}");
+    }
+    return;
+  }
+
+  if (path == "/api/ota/end") {
+    if (Update.end(true)) {
+      Serial.println("{\"ok\":true,\"message\":\"Firmware flashed successfully. Rebooting...\"}");
+      Serial.flush();
+
+      // Display completion notice
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(16, 20);
+      display.println("UPDATE COMPLETE!");
+      display.setCursor(28, 38);
+      display.println("Rebooting...");
+      display.display();
+
+      delay(700);
+      ESP.restart();
+      return;
+    } else {
+      Serial.println("{\"ok\":false,\"message\":\"Update failed: " + String(Update.errorString()) + "\"}");
+      return;
+    }
+  }
+  // ----------------------------------------
 
   if (path == "/api/setup/complete") {
     int doneVal = 1;
