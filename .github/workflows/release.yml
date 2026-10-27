@@ -1,0 +1,54 @@
+name: Build & Publish ESP32 Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile ESP32 Sketch (.bin)
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: esp32:esp32:esp32:PartitionScheme=min_spiffs
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          sketch-paths: |
+            - .
+          enable-deltas-upload: true
+          deltas-upload-path: build-artifacts
+
+      - name: Compute SHA-256 & Release Metadata
+        id: meta
+        run: |
+          BIN_FILE=$(find build-artifacts -name "*.ino.bin" | head -n 1)
+          cp "$BIN_FILE" StudioMacroPad.ino.bin
+          HASH=$(sha256sum StudioMacroPad.ino.bin | awk '{print $1}')
+          SIZE=$(wc -c < StudioMacroPad.ino.bin | tr -d ' ')
+          echo "$HASH  StudioMacroPad.ino.bin" > SHA256SUMS.txt
+          cat > firmware-manifest.json <<EOF
+          {
+            "version": "${GITHUB_REF_NAME#v}",
+            "tag": "${GITHUB_REF_NAME}",
+            "binary": "StudioMacroPad.ino.bin",
+            "sha256": "$HASH",
+            "sizeBytes": $SIZE
+          }
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: SHA256SUMS.txt
+          files: |
+            StudioMacroPad.ino.bin
+            firmware-manifest.json
+            SHA256SUMS.txt
