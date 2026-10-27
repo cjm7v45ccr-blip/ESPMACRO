@@ -25,7 +25,7 @@
 #define API_VERSION 2
 #endif
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "3.2-PRO"
+#define FIRMWARE_VERSION "4.2.0"
 #endif
 #ifndef SETUP_AP_PREFIX
 #define SETUP_AP_PREFIX "MacroPad"
@@ -95,6 +95,7 @@ uint8_t currentBleSlot = 0; // 0 = Device 1, 1 = Device 2, 2 = Device 3
 String bleDeviceName = "Studio Pad 1";
 
 bool inSetupMode = false;
+bool setup_done = false;
 bool mdnsStarted = false;
 String setupSsid = "";
 String setupPass = "";
@@ -809,7 +810,10 @@ String profileJson(const String& id) {
 
 String buildStatusJson() {
   const bool wifi = WiFi.status() == WL_CONNECTED;
-  String json = "{\"ok\":true,\"setupMode\":" + String(inSetupMode ? "true" : "false") + ",\"api_version\":" + String(API_VERSION) + ",\"rev\":" + String(config_rev) + ",";
+  String json = "{\"ok\":true,\"setup_mode\":" + String(inSetupMode ? "true" : "false") + 
+                ",\"setup_done\":" + String(setup_done ? "true" : "false") + 
+                ",\"setupMode\":" + String(inSetupMode ? "true" : "false") + 
+                ",\"api_version\":" + String(API_VERSION) + ",\"rev\":" + String(config_rev) + ",";
   json += "\"device\":{\"id\":" + jsonQuote(deviceId()) + ",\"name\":\"Studio MacroPad\",\"firmware\":\"" FIRMWARE_VERSION "\",\"connection_type\":" + jsonQuote(wifi ? "USB + Wi-Fi" : "USB") + "},";
   json += "\"connection\":{\"wifi_connected\":" + String(wifi ? "true" : "false") + ",\"ip\":" + jsonQuote(wifi ? WiFi.localIP().toString() : WiFi.softAPIP().toString()) + ",\"ble_connected\":" + String(bleKeyboard.isConnected() ? "true" : "false") + "},";
   json += "\"ble\":{\"active_host\":" + String(currentBleSlot + 1) + ",\"max_hosts\":" + String(MAX_BLE_SLOTS) + ",\"device_name\":" + jsonQuote(bleDeviceName) + "},";
@@ -856,6 +860,10 @@ void handleSaveBinding() {
     return;
   }
   saveBinding(profile, slotIndex(slot), action);
+  if (!setup_done) {
+    setup_done = true;
+    prefs.begin("config", false); prefs.putBool("setup_done", true); prefs.end();
+  }
   sendJson(200, "{\"ok\":true,\"message\":\"Assignment saved to the device.\"}");
 }
 
@@ -1096,6 +1104,33 @@ void setupWebServer() {
   server.on("/api/test/key", HTTP_POST, handleTestKey);
   server.on("/api/test/app", HTTP_POST, handleTestApp);
 
+  server.on("/api/setup/complete", HTTP_POST, []() {
+    int doneVal = 1;
+    if (server.hasArg("plain")) jsonInt(server.arg("plain"), "setup_done", doneVal);
+    setup_done = (doneVal != 0);
+    inSetupMode = false;
+    prefs.begin("config", false); 
+    prefs.putBool("setup_done", setup_done); 
+    prefs.end();
+    screenDirty = true;
+    showToast("Setup Saved", 1000);
+    emitSetupStatus();
+    sendJson(200, "{\"ok\":true,\"message\":\"Setup saved to Pad.\"}");
+  });
+
+  server.on("/api/setup/enter", HTTP_POST, []() {
+    int doneVal = 0;
+    if (server.hasArg("plain")) jsonInt(server.arg("plain"), "setup_done", doneVal);
+    setup_done = (doneVal != 0);
+    inSetupMode = true;
+    prefs.begin("config", false); 
+    prefs.putBool("setup_done", setup_done); 
+    prefs.end();
+    screenDirty = true;
+    emitSetupStatus();
+    sendJson(200, "{\"ok\":true,\"message\":\"Entered setup mode.\"}");
+  });
+
   server.on("/api/ble/switch", HTTP_POST, []() {
     String body;
     int slot = 0;
@@ -1127,6 +1162,35 @@ void processSerialPacket(const String& body) {
 
   if (path == "/api/status" || path == "/api/device") {
     Serial.println(buildStatusJson());
+    return;
+  }
+
+  if (path == "/api/setup/complete") {
+    int doneVal = 1;
+    jsonInt(body, "setup_done", doneVal);
+    setup_done = (doneVal != 0);
+    inSetupMode = false;
+    prefs.begin("config", false); 
+    prefs.putBool("setup_done", setup_done); 
+    prefs.end();
+    screenDirty = true;
+    showToast("Setup Saved", 1000);
+    emitSetupStatus();
+    Serial.println("{\"ok\":true,\"message\":\"Setup saved to Pad.\"}");
+    return;
+  }
+
+  if (path == "/api/setup/enter") {
+    int doneVal = 0;
+    jsonInt(body, "setup_done", doneVal);
+    setup_done = (doneVal != 0);
+    inSetupMode = true;
+    prefs.begin("config", false); 
+    prefs.putBool("setup_done", setup_done); 
+    prefs.end();
+    screenDirty = true;
+    emitSetupStatus();
+    Serial.println("{\"ok\":true,\"message\":\"Entered setup mode.\"}");
     return;
   }
   
@@ -1423,6 +1487,7 @@ void processSerialPacket(const String& body) {
 }
 
 bool isDeviceConfigured() {
+  if (setup_done) return true;
   if (stored_ssid.length() > 0) return true;
   for (int h = 0; h < 3; ++h) {
     for (int i = 0; i < 11; ++i) {
@@ -1433,11 +1498,12 @@ bool isDeviceConfigured() {
 }
 
 void emitSetupStatus() {
-  const bool unconfigured = !isDeviceConfigured();
-  String json = "{\"mode\":\"" + String(inSetupMode ? "setup" : "normal") + 
-                "\",\"status\":\"" + String(unconfigured ? "unconfigured" : "configured") + 
-                "\",\"device\":\"StudioPad\",\"setupMode\":" + String(inSetupMode ? "true" : "false") + "}";
-  Serial.println(json);
+  if (inSetupMode) {
+    // Matches the web app's contract triggers
+    Serial.println("{\"event\":\"setup\",\"setup_mode\":true,\"mode\":\"setup\"}");
+  } else {
+    Serial.println("{\"event\":\"setup\",\"setup_mode\":false,\"mode\":\"normal\"}");
+  }
 }
 
 void startSetupPortal() {
@@ -1522,6 +1588,7 @@ void loadConfiguration() {
   currentMode = prefs.getUChar("mode", 0) == 1 ? MODE_TV : MODE_BLE;
   currentBleSlot = prefs.getUChar("ble_slot", 0);
   if (currentBleSlot >= MAX_BLE_SLOTS) currentBleSlot = 0;
+  setup_done = prefs.getBool("setup_done", false);
   prefs.end();
   stored_tv_auth.trim();
 
@@ -1575,9 +1642,16 @@ void setup() {
 
   loadConfiguration();
 
-  // If newly provisioned or button held on boot, announce setup mode
-  if (inSetupMode || !isDeviceConfigured()) {
-    if (!isDeviceConfigured()) inSetupMode = true;
+  // Only enter setup mode if Mode button is held on boot, or if completely brand new
+  if (digitalRead(PIN_BTN_MODE) == LOW) {
+    inSetupMode = true;
+  } else if (!isDeviceConfigured()) {
+    inSetupMode = true;
+  } else {
+    inSetupMode = false;
+  }
+
+  if (inSetupMode) {
     emitSetupStatus();
   }
 
