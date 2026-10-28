@@ -4,51 +4,57 @@ on:
   push:
     tags:
       - 'v*'
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
   release-firmware:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v1
+
+      - name: Install ESP32 Board Core
+        run: |
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Install Libraries
+        run: |
+          arduino-cli lib install "NimBLE-Arduino"
+          arduino-cli lib install "Adafruit SSD1306"
+          arduino-cli lib install "Adafruit GFX Library"
+          
+          # Manually install ESP32-BLE-Keyboard
+          mkdir -p ~/Arduino/libraries
+          git clone https://github.com/T-vK/ESP32-BLE-Keyboard.git ~/Arduino/libraries/ESP32-BLE-Keyboard
 
       - name: Compile ESP32 Sketch (.bin)
-        uses: arduino/compile-sketches@v1
-        with:
-          fqbn: esp32:esp32:esp32:PartitionScheme=min_spiffs
-          platforms: |
-            - name: esp32:esp32
-              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          sketch-paths: |
-            - .
-          enable-deltas-upload: true
-          deltas-upload-path: build-artifacts
-
-      - name: Compute SHA-256 & Release Metadata
-        id: meta
         run: |
-          BIN_FILE=$(find build-artifacts -name "*.ino.bin" | head -n 1)
-          cp "$BIN_FILE" StudioMacroPad.ino.bin
-          HASH=$(sha256sum StudioMacroPad.ino.bin | awk '{print $1}')
-          SIZE=$(wc -c < StudioMacroPad.ino.bin | tr -d ' ')
-          echo "$HASH  StudioMacroPad.ino.bin" > SHA256SUMS.txt
-          cat > firmware-manifest.json <<EOF
-          {
-            "version": "${GITHUB_REF_NAME#v}",
-            "tag": "${GITHUB_REF_NAME}",
-            "binary": "StudioMacroPad.ino.bin",
-            "sha256": "$HASH",
-            "sizeBytes": $SIZE
-          }
-          EOF
+          SKETCH_PATH=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+            --build-property "compiler.cpp.extra_flags=-DUSE_NIMBLE" \
+            --output-dir ./build \
+            "$SKETCH_PATH"
+
+      - name: Compute SHA-256 & Release Assets
+        run: |
+          cd ./build
+          sha256sum *.bin > checksums.txt
+          ls -la
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          body_path: SHA256SUMS.txt
           files: |
-            StudioMacroPad.ino.bin
-            firmware-manifest.json
-            SHA256SUMS.txt
+            ./build/*.bin
+            ./build/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
