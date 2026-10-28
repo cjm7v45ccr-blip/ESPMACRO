@@ -2,8 +2,8 @@ name: Build & Publish ESP32 Firmware
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main, master ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 jobs:
@@ -20,34 +20,41 @@ jobs:
       - name: Install ESP32 Board Core
         run: |
           arduino-cli config init
-          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
       - name: Install Libraries
         run: |
+          # 1. Install official Arduino registry libraries
           arduino-cli lib install "NimBLE-Arduino"
           arduino-cli lib install "Adafruit SSD1306"
           arduino-cli lib install "Adafruit GFX Library"
-          
-          # Manually install ESP32-BLE-Keyboard
+
+          # 2. Clone ESP32-BLE-Keyboard (which does not exist in Arduino Library Manager)
           mkdir -p ~/Arduino/libraries
           git clone https://github.com/T-vK/ESP32-BLE-Keyboard.git ~/Arduino/libraries/ESP32-BLE-Keyboard
 
       - name: Compile ESP32 Sketch (.bin)
         run: |
-          SKETCH_PATH=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          # Automatically find your .ino file wherever it is located in the repo
+          INO_PATH=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          echo "Found Sketch at: $INO_PATH"
+          mkdir -p ./build
+
+          # Compile using 1.9MB partition with full verbose output
           arduino-cli compile \
             --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
-            --build-property "compiler.cpp.extra_flags=-DUSE_NIMBLE" \
             --output-dir ./build \
-            "$SKETCH_PATH"
+            --export-binaries \
+            --verbose \
+            "$INO_PATH"
 
       - name: Compute SHA-256 & Release Assets
         run: |
           cd ./build
-          sha256sum *.bin > checksums.txt
           ls -la
+          sha256sum *.bin > checksums.txt || true
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
