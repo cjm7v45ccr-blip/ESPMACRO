@@ -26,23 +26,17 @@ jobs:
 
       - name: Install Libraries
         run: |
-          # 1. Install official Arduino registry libraries
           arduino-cli lib install "NimBLE-Arduino"
           arduino-cli lib install "Adafruit SSD1306"
           arduino-cli lib install "Adafruit GFX Library"
-
-          # 2. Clone ESP32-BLE-Keyboard (which does not exist in Arduino Library Manager)
           mkdir -p ~/Arduino/libraries
           git clone https://github.com/T-vK/ESP32-BLE-Keyboard.git ~/Arduino/libraries/ESP32-BLE-Keyboard
 
       - name: Compile ESP32 Sketch (.bin)
         run: |
-          # Automatically find your .ino file wherever it is located in the repo
           INO_PATH=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
-          echo "Found Sketch at: $INO_PATH"
+          echo "Compiling sketch found at: $INO_PATH"
           mkdir -p ./build
-
-          # Compile using 1.9MB partition with full verbose output
           arduino-cli compile \
             --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
             --output-dir ./build \
